@@ -1,17 +1,28 @@
-import log from "./utils/logger.js"
-import bedduSalama from "./utils/banner.js"
+import log from "./utils/logger.js";
+import bedduSalama from "./utils/banner.js";
 import { delay, readAccountsFromFile, readFile } from './utils/helper.js';
 import { claimMining, getNewToken, getUserFarm, activateMining } from './utils/api.js';
 import fs from 'fs/promises';
 
 async function refreshAccessToken(token, refreshToken, proxy) {
     let refresh;
+    let attempts = 0;
+    const maxAttempts = 5; // Set a retry limit
+
     do {
         refresh = await getNewToken(token, refreshToken, proxy);
-        if (!refresh) log.info('Token refresh failed, retrying...');
-        await delay(3);
+        if (!refresh) {
+            log.warn(`Token refresh failed, retrying... [${attempts + 1}/${maxAttempts}]`);
+            attempts++;
+            if (attempts >= maxAttempts) {
+                log.error('Max token refresh attempts reached. Token may be expired.');
+                return null; // Exit loop and handle this higher up
+            }
+            await delay(3);
+        }
     } while (!refresh);
-    log.info('Token refreshed succesfully', refresh);
+
+    log.info('Token refreshed successfully', refresh);
     return refresh;
 }
 
@@ -23,6 +34,7 @@ async function activateMiningProcess(token, refreshToken, proxy) {
         if (activate === "unauth") {
             log.warn('Unauthorized, refreshing token...');
             const refreshedTokens = await refreshAccessToken(token, refreshToken, proxy);
+            if (!refreshedTokens) return null; // Handle failed refresh
             token = refreshedTokens.accessToken;
             refreshToken = refreshedTokens.refreshToken;
         } else if (!activate) {
@@ -41,6 +53,10 @@ async function getUserFarmInfo(accessToken, refreshToken, proxy, index) {
     do {
         log.warn(`Account ${index}, refreshing token...`);
         const refreshedTokens = await refreshAccessToken(accessToken, refreshToken, proxy);
+        if (!refreshedTokens) {
+            log.error(`Account ${index} failed to refresh tokens after multiple attempts. Skipping...`);
+            return null;
+        }
         accessToken = refreshedTokens.accessToken;
         refreshToken = refreshedTokens.refreshToken;
         userFarmInfo = await getUserFarm(accessToken);
@@ -67,9 +83,9 @@ async function handleFarming(userFarmInfo, token, refreshToken, proxy) {
         } while (!claimResponse);
 
         log.info('Farming rewards claimed response:', claimResponse);
-        await activateMiningProcess(token, refreshToken, proxy)
+        await activateMiningProcess(token, refreshToken, proxy);
     } else {
-        log.info('Farming rewards can be claimed at:', new Date(canBeClaimedAt).toLocaleString())
+        log.info('Farming rewards can be claimed at:', new Date(canBeClaimedAt).toLocaleString());
     }
 }
 
@@ -95,7 +111,9 @@ async function main() {
             try {
                 const { token, reToken } = account;
                 log.info(`Processing run account ${i + 1} of ${accounts.length} with: ${proxy || "No proxy"}`);
-                const { userFarmInfo, accessToken, refreshToken } = await getUserFarmInfo(token, reToken, proxy, i + 1);
+                const farmInfo = await getUserFarmInfo(token, reToken, proxy, i + 1);
+                if (!farmInfo) continue; // Skip if userFarmInfo is null
+                const { userFarmInfo, accessToken, refreshToken } = farmInfo;
                 await activateMiningProcess(accessToken, refreshToken, proxy);
                 await handleFarming(userFarmInfo, accessToken, refreshToken, proxy);
 
